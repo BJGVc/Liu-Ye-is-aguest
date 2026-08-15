@@ -521,6 +521,61 @@ MoveTab:Toggle({
     end
 })
 
+local autoJumpEnabled = false
+local autoJumpInterval = 1.0
+local autoJumpThread = nil
+
+local function stopAutoJump()
+    autoJumpEnabled = false
+    if autoJumpThread then
+        task.cancel(autoJumpThread)
+        autoJumpThread = nil
+    end
+end
+
+local function startAutoJump()
+    if autoJumpThread then
+        task.cancel(autoJumpThread)
+    end
+    autoJumpThread = task.spawn(function()
+        while autoJumpEnabled do
+            local char = player.Character
+            local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+            if humanoid and humanoid.Health > 0 then
+                humanoid.Jump = true
+                pcall(function()
+                    humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                end)
+            end
+            task.wait(math.max(0.05, autoJumpInterval))
+        end
+        autoJumpThread = nil
+    end)
+end
+
+MoveTab:Toggle({
+    Title = "自动跳跃",
+    Desc = "按设定频率持续原地跳跃",
+    Default = false,
+    Callback = function(state)
+        autoJumpEnabled = state
+        if state then
+            startAutoJump()
+        else
+            stopAutoJump()
+        end
+    end
+})
+
+MoveTab:Slider({
+    Title = "自动跳跃频率",
+    Desc = "数值越小跳得越频繁",
+    Value = { Min = 0.1, Max = 5, Default = 1, Step = 0.1 },
+    Callback = function(value)
+        autoJumpInterval = math.max(0.1, tonumber(value) or 1)
+    end
+})
+
 local flyGui = Instance.new("ScreenGui")
 flyGui.Name = "FlyControl"
 flyGui.ResetOnSpawn = false
@@ -1217,34 +1272,6 @@ FarmTab:Button({
 })
 
 local Players = game:GetService("Players")
-
-local LocalPlayer = Players.LocalPlayer
-local AntiAFK = false
-local Interval = 60
-
-task.spawn(function()
-    while task.wait(1) do
-        if AntiAFK then
-            local Character = LocalPlayer.Character
-            local Humanoid = Character and Character:FindFirstChildOfClass("Humanoid")
-
-            if Humanoid and Humanoid.Health > 0 then
-                Humanoid.Jump = true
-                task.wait(Interval - 1)
-            end
-        end
-    end
-end)
-
-FarmTab:Toggle({
-    Title = "反挂机",
-    Value = false,
-    Callback = function(Value)
-        AntiAFK = Value
-    end
-})
-
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Player = Players.LocalPlayer
@@ -1391,27 +1418,82 @@ local function Unequip()
     end
 end
 
+local function GetFoodPart(Object)
+    if not Object then
+        return nil
+    end
+
+    local Handle = Object:FindFirstChild("Handle", true)
+    if Handle and Handle:IsA("BasePart") then
+        return Handle
+    end
+
+    local Prompt = Object:FindFirstChildWhichIsA("ProximityPrompt", true)
+    if Prompt then
+        local Parent = Prompt.Parent
+        if Parent and Parent:IsA("BasePart") then
+            return Parent
+        end
+    end
+
+    return Object:FindFirstChildWhichIsA("BasePart", true)
+end
+
+local function GetFoodPrompt(Object)
+    return Object and Object:FindFirstChildWhichIsA("ProximityPrompt", true)
+end
+
+local function GetFoodTargetCFrame(Object, Part)
+    if not Part then
+        return nil
+    end
+
+    local Prompt = GetFoodPrompt(Object)
+    if Prompt and Prompt.Parent == Part then
+        return Part.CFrame * CFrame.new(0, 1.5, -2.5)
+    end
+
+    return Part.CFrame * CFrame.new(0, 1.5, -2.5)
+end
+
 local function FindNearestFood()
     local Character = GetCharacter()
     local Root = Character:FindFirstChild("HumanoidRootPart")
 
-    if not Root then
+    if not Root or not ItemsFolder then
         return nil
     end
 
     local Best
     local BestDistance = math.huge
 
+    for _, Object in ipairs(ItemsFolder:GetChildren()) do
+        if IsFood(Object) then
+            local Part = GetFoodPart(Object)
+            local Prompt = GetFoodPrompt(Object)
+
+            if Part and (not Prompt or Prompt.Enabled) then
+                local Distance = (Part.Position - Root.Position).Magnitude
+
+                if Distance < BestDistance then
+                    BestDistance = Distance
+                    Best = Object
+                end
+            end
+        end
+    end
+
+    if Best then
+        return Best
+    end
+
     for _, Object in ipairs(ItemsFolder:GetDescendants()) do
-        if Object:IsA("Tool")
-            and Object.Parent ~= Character
-            and not Object:FindFirstAncestorOfClass("Backpack")
-            and IsFood(Object) then
+        if Object:IsA("Tool") and IsFood(Object) then
+            local Part = GetFoodPart(Object)
+            local Prompt = GetFoodPrompt(Object)
 
-            local Handle = Object:FindFirstChild("Handle")
-
-            if Handle then
-                local Distance = (Handle.Position - Root.Position).Magnitude
+            if Part and (not Prompt or Prompt.Enabled) then
+                local Distance = (Part.Position - Root.Position).Magnitude
 
                 if Distance < BestDistance then
                     BestDistance = Distance
@@ -1433,43 +1515,50 @@ local function PickupFood(Food)
 
     local Character = GetCharacter()
     local Root = Character:FindFirstChild("HumanoidRootPart")
+    local Part = GetFoodPart(Food)
 
-    if not Root then
+    if not Root or not Part then
         return false
     end
 
-    local Handle = Food:FindFirstChild("Handle")
-
-    if not Handle then
+    local TargetCFrame = GetFoodTargetCFrame(Food, Part)
+    if not TargetCFrame then
         return false
     end
 
-    Root.CFrame = CFrame.new(Handle.Position + Vector3.new(0, 2, 2))
+    Character:PivotTo(TargetCFrame)
+    task.wait(0.05)
 
-    task.wait()
+    local Prompt = GetFoodPrompt(Food)
+    if Prompt and Prompt.Enabled then
+        pcall(function()
+            Prompt:InputHoldBegin()
+        end)
+        task.wait(math.max(0.05, Prompt.HoldDuration + 0.05))
+        pcall(function()
+            Prompt:InputHoldEnd()
+        end)
+        task.wait(0.08)
+    end
 
     pcall(function()
         PickupRemote:FireServer(Food)
     end)
 
     local Start = os.clock()
-
-    while Enabled and os.clock() - Start < 1 do
+    while Enabled and os.clock() - Start < 1.25 do
         if not Food.Parent or Food:FindFirstAncestorOfClass("Backpack") then
             break
         end
-
-        task.wait()
+        task.wait(0.05)
     end
 
     local Backpack = GetBackpack()
-
     if not Backpack then
         return false
     end
 
     local Stored = Backpack:FindFirstChild(Food.Name)
-
     if not Stored then
         return false
     end
@@ -1478,9 +1567,8 @@ local function PickupFood(Food)
         EquipRemote:FireServer(Stored)
     end)
 
-    task.wait()
-
-    return Stored
+    task.wait(0.05)
+    return true
 end
 
 local function EquipFood(Food)
@@ -1641,6 +1729,120 @@ FarmTab:Toggle({
 
         if Value then
             Run()
+        end
+    end
+})
+
+
+local AutoItemDropEnabled = false
+local AutoItemDropThread = nil
+
+local TargetItems = {
+    "Cola",
+    "Burger",
+    "AmmoARBasic",
+    "AmmoShotgunBasic",
+    "AmmoShotgun",
+    "BasicAmmoShotgunBasic",
+    "BasicFlashlight",
+    "BigBasicFlashlight",
+    "StandardBasicFlashlight",
+    "Ham",
+    "Hotdog",
+    "Katana",
+    "GreenCube",
+    "PumpShotgun",
+    "Plank",
+    "RedCube",
+    "BasicFlashlight_Standard",
+    "Meshes/flashlights_Cylinder.001(1)",
+    "AmmoPistolBasic"
+}
+
+local TargetLookup = {}
+for _, Name in ipairs(TargetItems) do
+    TargetLookup[Name] = true
+end
+
+local function IsDropTarget(Item)
+    return Item and TargetLookup[Item.Name] == true
+end
+
+local function GetDropPosition(Object)
+    local Part = Object and Object:FindFirstChildWhichIsA("BasePart", true)
+    if Part then
+        return Part.Position
+    end
+    local Success, Pivot = pcall(function()
+        return Object:GetPivot()
+    end)
+    if Success and Pivot then
+        return Pivot.Position
+    end
+    return nil
+end
+
+local function DropTargetItem(Item)
+    local Position = GetDropPosition(Item)
+    if Position then
+        pcall(function()
+            ReplicatedStorage.Remotes.RequestDropItem:FireServer(Item, Position)
+        end)
+    end
+end
+
+local function StartAutoItemDrop()
+    if AutoItemDropThread then
+        return
+    end
+    AutoItemDropThread = task.spawn(function()
+        while AutoItemDropEnabled do
+            local Character = Player.Character
+            local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+            local Folder = workspace.Map and workspace.Map:FindFirstChild("Util") and workspace.Map.Util:FindFirstChild("Items")
+
+            if Root and Folder then
+                for _, Item in ipairs(Folder:GetChildren()) do
+                    if not AutoItemDropEnabled then
+                        break
+                    end
+                    if IsDropTarget(Item) then
+                        local Part = Item:FindFirstChildWhichIsA("BasePart", true)
+                        local Prompt = Item:FindFirstChildWhichIsA("ProximityPrompt", true)
+                        if Part and Prompt and Prompt.Enabled then
+                            local Distance = (Root.Position - Part.Position).Magnitude
+                            if Distance <= Prompt.MaxActivationDistance + 1 then
+                                pcall(function()
+                                    Prompt:InputHoldBegin()
+                                end)
+                                task.wait(math.max(0.05, Prompt.HoldDuration + 0.05))
+                                pcall(function()
+                                    Prompt:InputHoldEnd()
+                                end)
+                                task.wait(0.08)
+                                DropTargetItem(Item)
+                                task.wait(0.35)
+                                break
+                            end
+                        end
+                    end
+                end
+            end
+
+            task.wait(0.1)
+        end
+        AutoItemDropThread = nil
+    end)
+end
+
+FarmTab:Toggle({
+    Title = "自动拾取后丢弃",
+    Desc = "检测目标物品后自动交互并执行丢弃",
+    Value = false,
+    Callback = function(Value)
+        AutoItemDropEnabled = Value
+        if Value then
+            StartAutoItemDrop()
         end
     end
 })
